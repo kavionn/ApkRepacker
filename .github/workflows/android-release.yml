@@ -1,0 +1,86 @@
+name: Build APK & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Validate Android project files
+        run: |
+          if [ ! -f ./gradlew ]; then
+            echo "gradlew not found. Ensure this repository contains an Android Gradle project."
+            exit 1
+          fi
+
+      - name: Update target/compile SDK to 34 (best effort)
+        run: |
+          set -e
+          FILES=$(find . -maxdepth 4 \( -name "build.gradle" -o -name "build.gradle.kts" \) | tr '\n' ' ')
+          if [ -z "$FILES" ]; then
+            echo "No Gradle build files found to update SDK settings."
+            exit 1
+          fi
+
+          for f in $FILES; do
+            sed -Ei 's/compileSdkVersion[[:space:]]+[0-9]+/compileSdkVersion 34/g' "$f" || true
+            sed -Ei 's/targetSdkVersion[[:space:]]+[0-9]+/targetSdkVersion 34/g' "$f" || true
+            sed -Ei 's/compileSdk[[:space:]]*=[[:space:]]*[0-9]+/compileSdk = 34/g' "$f" || true
+            sed -Ei 's/targetSdk[[:space:]]*=[[:space:]]*[0-9]+/targetSdk = 34/g' "$f" || true
+          done
+
+      - name: Grant execute permission for Gradle
+        run: chmod +x ./gradlew
+
+      - name: Build release APK
+        run: ./gradlew assembleRelease
+
+      - name: Prepare artifact metadata
+        id: meta
+        run: |
+          APK_PATH=$(find . -path "*/build/outputs/apk/release/*.apk" | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            echo "APK not found in build/outputs/apk/release"
+            exit 1
+          fi
+          TAG_NAME="${GITHUB_REF_NAME}"
+          if [ -z "$TAG_NAME" ]; then
+            echo "This workflow must run from a git tag (for example: v1.0.0)."
+            exit 1
+          fi
+          echo "apk_path=$APK_PATH" >> "$GITHUB_OUTPUT"
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-apk
+          path: ${{ steps.meta.outputs.apk_path }}
+
+      - name: Create / Update GitHub Release and upload APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag_name }}
+          name: Release ${{ steps.meta.outputs.tag_name }}
+          generate_release_notes: true
+          files: ${{ steps.meta.outputs.apk_path }}
